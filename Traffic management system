@@ -1,0 +1,326 @@
+#include <iostream>
+#include <queue>
+#include <vector>
+#include <string>
+#include <iomanip>
+#include <sstream>
+#include <cstdlib>
+#include <ctime>
+#include <limits>
+using namespace std;
+
+const int NUM_ROADS = 4;
+const int BASE_GREEN = 10;
+const int PER_VEHICLE_GREEN = 2;
+const int MAX_GREEN_NORMAL = 30;
+const int MAX_GREEN_RUSH = 50;
+const int YELLOW_TIME = 3;
+const int SECONDS_PER_VEHICLE = 2;
+const int STARVATION_LIMIT = 4;
+const int EMERGENCY_BONUS = 1000;
+const int STARVATION_BONUS = 500;
+const int EMERGENCY_CHANCE = 1;
+
+enum VehicleType { CAR, BUS, BIKE, AMBULANCE, FIRETRUCK };
+enum SignalState { RED, GREEN };
+
+class Vehicle {
+private:
+    int id;
+    VehicleType type;
+    int arrivalTime;
+
+public:
+    Vehicle(int i, VehicleType t, int a) : id(i), type(t), arrivalTime(a) {}
+
+    int getId() const { return id; }
+    VehicleType getType() const { return type; }
+    int getArrivalTime() const { return arrivalTime; }
+
+    bool isEmergency() const { return type == AMBULANCE || type == FIRETRUCK; }
+
+    string typeName() const {
+        switch (type) {
+            case CAR:       return "Car";
+            case BUS:       return "Bus";
+            case BIKE:      return "Bike";
+            case AMBULANCE: return "Ambulance";
+            case FIRETRUCK: return "Fire Truck";
+        }
+        return "Unknown";
+    }
+
+    bool operator<(const Vehicle& other) const {
+        if (isEmergency() != other.isEmergency())
+            return !isEmergency();
+        if (arrivalTime != other.arrivalTime)
+            return arrivalTime > other.arrivalTime;
+        return id > other.id;
+    }
+};
+
+class Road {
+private:
+    string name;
+    priority_queue<Vehicle> lane;
+    int emergencyCount;
+    int cyclesSinceGreen;
+    SignalState state;
+
+public:
+    Road(string n = "") : name(n), emergencyCount(0), cyclesSinceGreen(0), state(RED) {}
+
+    string getName() const { return name; }
+    int queueLength() const { return (int)lane.size(); }
+    int getEmergencyCount() const { return emergencyCount; }
+    bool hasEmergency() const { return emergencyCount > 0; }
+    int getCyclesSinceGreen() const { return cyclesSinceGreen; }
+    SignalState getState() const { return state; }
+
+    void addVehicle(const Vehicle& v) {
+        lane.push(v);
+        if (v.isEmergency()) emergencyCount++;
+    }
+
+    Vehicle releaseVehicle() {
+        Vehicle v = lane.top();
+        lane.pop();
+        if (v.isEmergency()) emergencyCount--;
+        return v;
+    }
+
+    void setSignal(SignalState s) {
+        state = s;
+        if (s == GREEN) cyclesSinceGreen = 0;
+    }
+
+    void tickWait() { cyclesSinceGreen++; }
+};
+
+class Intersection {
+private:
+    Road roads[NUM_ROADS];
+    int clock;
+    int nextId;
+    int cycleNo;
+
+    long totalArrived, totalPassed, emergencyPassed;
+    long totalWait;
+    int maxWait;
+    int passedPerRoad[NUM_ROADS];
+
+public:
+    Intersection(int startHour) {
+        roads[0] = Road("North");
+        roads[1] = Road("East");
+        roads[2] = Road("South");
+        roads[3] = Road("West");
+        clock = startHour * 3600;
+        nextId = 1;
+        cycleNo = 0;
+        totalArrived = totalPassed = emergencyPassed = totalWait = 0;
+        maxWait = 0;
+        for (int i = 0; i < NUM_ROADS; i++) passedPerRoad[i] = 0;
+    }
+
+    int hourNow() const { return (clock / 3600) % 24; }
+
+    bool isRushHour() const {
+        int h = hourNow();
+        return (h >= 8 && h < 10) || (h >= 17 && h < 20);
+    }
+
+    string timeString() const {
+        int t = clock % 86400;
+        ostringstream os;
+        os << setfill('0') << setw(2) << t / 3600 << ":"
+           << setw(2) << (t % 3600) / 60 << ":"
+           << setw(2) << t % 60;
+        return os.str();
+    }
+
+    void generateArrivals() {
+        int maxArrivals = isRushHour() ? 6 : 2;
+        for (int r = 0; r < NUM_ROADS; r++) {
+            int n = rand() % (maxArrivals + 1);
+            for (int k = 0; k < n; k++) {
+                VehicleType t;
+                int roll = rand() % 100;
+                if (roll < EMERGENCY_CHANCE)
+                    t = (rand() % 2 == 0) ? AMBULANCE : FIRETRUCK;
+                else if (roll < 55) t = CAR;
+                else if (roll < 80) t = BIKE;
+                else t = BUS;
+                roads[r].addVehicle(Vehicle(nextId++, t, clock));
+                totalArrived++;
+            }
+        }
+    }
+
+    void addManualVehicle(int road, VehicleType t) {
+        roads[road].addVehicle(Vehicle(nextId++, t, clock));
+        totalArrived++;
+    }
+
+    int calculateScore(int i) const {
+        int score = roads[i].queueLength() + 2 * roads[i].getCyclesSinceGreen();
+        if (roads[i].hasEmergency()) score += EMERGENCY_BONUS;
+        if (roads[i].getCyclesSinceGreen() >= STARVATION_LIMIT) score += STARVATION_BONUS;
+        return score;
+    }
+
+    int chooseNextRoad() const {
+        priority_queue< pair<int, int> > heap;
+        for (int i = 0; i < NUM_ROADS; i++)
+            heap.push(make_pair(calculateScore(i), -i));
+        return -heap.top().second;
+    }
+
+    int calculateGreenTime(int i) const {
+        int maxGreen = isRushHour() ? MAX_GREEN_RUSH : MAX_GREEN_NORMAL;
+        int g = BASE_GREEN + roads[i].queueLength() * PER_VEHICLE_GREEN;
+        return (g > maxGreen) ? maxGreen : g;
+    }
+
+    void showStatus() const {
+        cout << "\n  Time: " << timeString()
+             << "   Mode: " << (isRushHour() ? "RUSH HOUR" : "Normal") << "\n";
+        for (int i = 0; i < NUM_ROADS; i++) {
+            cout << "  " << left << setw(6) << roads[i].getName()
+                 << " | " << (roads[i].getState() == GREEN ? "GREEN" : "RED  ")
+                 << " | waiting: " << setw(3) << roads[i].queueLength()
+                 << " | emergency: " << roads[i].getEmergencyCount()
+                 << " | cycles since green: " << roads[i].getCyclesSinceGreen()
+                 << "\n";
+        }
+    }
+
+    void runCycle() {
+        cycleNo++;
+        generateArrivals();
+
+        int idx = chooseNextRoad();
+
+        string reason;
+        if (roads[idx].hasEmergency())
+            reason = "EMERGENCY vehicle priority";
+        else if (roads[idx].getCyclesSinceGreen() >= STARVATION_LIMIT)
+            reason = "Starvation guard (waited too long)";
+        else
+            reason = "Highest traffic score";
+
+        int greenTime = calculateGreenTime(idx);
+
+        cout << "\n==================== CYCLE " << cycleNo << " ====================";
+        showStatus();
+
+        for (int i = 0; i < NUM_ROADS; i++) roads[i].setSignal(RED);
+        roads[idx].setSignal(GREEN);
+
+        cout << "\n  >> GREEN for " << roads[idx].getName()
+             << " for " << greenTime << "s  (" << reason << ")\n";
+
+        int capacity = greenTime / SECONDS_PER_VEHICLE;
+        int passed = 0, emergencies = 0;
+        while (capacity > 0 && roads[idx].queueLength() > 0) {
+            Vehicle v = roads[idx].releaseVehicle();
+            int wait = clock + passed * SECONDS_PER_VEHICLE - v.getArrivalTime();
+            totalWait += wait;
+            if (wait > maxWait) maxWait = wait;
+            totalPassed++;
+            passedPerRoad[idx]++;
+            if (v.isEmergency()) {
+                emergencyPassed++;
+                emergencies++;
+                cout << "     [EMERGENCY] " << v.typeName() << " #" << v.getId()
+                     << " cleared (waited " << wait << "s)\n";
+            }
+            passed++;
+            capacity--;
+        }
+        cout << "     Vehicles passed: " << passed
+             << " (emergency: " << emergencies << ")"
+             << ", left waiting on " << roads[idx].getName() << ": "
+             << roads[idx].queueLength() << "\n";
+
+        clock += greenTime + YELLOW_TIME;
+        for (int i = 0; i < NUM_ROADS; i++)
+            if (i != idx) roads[i].tickWait();
+    }
+
+    void showSummary() const {
+        long waiting = 0;
+        for (int i = 0; i < NUM_ROADS; i++) waiting += roads[i].queueLength();
+
+        cout << "\n=============== SIMULATION SUMMARY ===============\n";
+        cout << "  Cycles run               : " << cycleNo << "\n";
+        cout << "  Current time             : " << timeString() << "\n";
+        cout << "  Vehicles arrived         : " << totalArrived << "\n";
+        cout << "  Vehicles passed          : " << totalPassed << "\n";
+        cout << "  Still waiting            : " << waiting << "\n";
+        cout << "  Emergency vehicles passed: " << emergencyPassed << "\n";
+        cout << fixed << setprecision(1);
+        cout << "  Average wait time        : "
+             << (totalPassed ? (double)totalWait / totalPassed : 0.0) << " s\n";
+        cout << "  Maximum wait time        : " << maxWait << " s\n";
+        cout << "  Vehicles passed per road :\n";
+        for (int i = 0; i < NUM_ROADS; i++)
+            cout << "     " << left << setw(6) << roads[i].getName()
+                 << ": " << passedPerRoad[i] << "\n";
+        cout << "==================================================\n";
+    }
+};
+
+int readInt(const string& prompt, int lo, int hi) {
+    int x;
+    while (true) {
+        cout << prompt;
+        if (cin >> x && x >= lo && x <= hi) return x;
+        cout << "  Invalid input. Enter a number between " << lo << " and " << hi << ".\n";
+        cin.clear();
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    }
+}
+
+int main() {
+    srand((unsigned)time(0));
+
+    cout << "*****************************************************\n";
+    cout << "      SMART TRAFFIC MANAGEMENT SYSTEM (4-WAY)        \n";
+    cout << "*****************************************************\n";
+
+    int startHour = readInt("Enter simulation start hour (0-23): ", 0, 23);
+    Intersection junction(startHour);
+
+    int choice;
+    do {
+        cout << "\n-------------------- MENU --------------------\n";
+        cout << " 1. Run simulation cycles\n";
+        cout << " 2. Add a vehicle manually\n";
+        cout << " 3. Show current status\n";
+        cout << " 4. Show summary statistics\n";
+        cout << " 5. Exit\n";
+        choice = readInt("Enter choice: ", 1, 5);
+
+        if (choice == 1) {
+            int n = readInt("Number of cycles to run (1-100): ", 1, 100);
+            for (int i = 0; i < n; i++) junction.runCycle();
+        } else if (choice == 2) {
+            cout << " Roads: 1.North 2.East 3.South 4.West\n";
+            int r = readInt("Choose road (1-4): ", 1, 4);
+            cout << " Types: 1.Car 2.Bus 3.Bike 4.Ambulance 5.Fire Truck\n";
+            int t = readInt("Choose vehicle type (1-5): ", 1, 5);
+            junction.addManualVehicle(r - 1, (VehicleType)(t - 1));
+            cout << " Vehicle added.\n";
+        } else if (choice == 3) {
+            junction.showStatus();
+        } else if (choice == 4) {
+            junction.showSummary();
+        }
+    } while (choice != 5);
+
+    junction.showSummary();
+    cout << "Simulation ended. Thank you!\n";
+    return 0;
+}
+
